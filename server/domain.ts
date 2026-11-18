@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import Decimal from 'decimal.js'
 import { z } from 'zod'
-import type { Baseline, Effect, Position, Trade, TradeView } from '../shared/types.js'
+import type { Baseline, Effect, PositionDetails, Trade, TradeView } from '../shared/types.js'
 Decimal.set({ precision: 32 })
 const numeric = z.union([z.string(), z.number()]).transform(String).refine(v => {
   try { return new Decimal(v).isFinite() } catch { return false }
@@ -37,14 +37,15 @@ export function uniqueTrades(trades: Trade[]): Trade[] {
 export type Mark = { price: string; at: number }
 export function replay(trades: Trade[], baseline: Baseline | null, marks: Map<string, Mark>, now: number) {
   const views = new Map<string, TradeView>()
-  const book = new Map<string, { symbol: string; positionSide: 'LONG' | 'SHORT'; qty: Decimal; avg: Decimal }>()
+  const book = new Map<string, { symbol: string; positionSide: 'LONG' | 'SHORT'; qty: Decimal; avg: Decimal; leverage?: string; marginMode?: 'CROSS' | 'ISOLATED' }>()
+  const selected = new Set(baseline?.positions.map(p => p.symbol + '|' + p.positionSide))
   const invalid = new Set<string>()
-  let warning: string | null = baseline ? null : '尚未设置期初仓位。确认完整的仓位起点后，才能推算当前持仓。'
+  let warning: string | null = baseline ? null : '尚未设置期初仓位。确认一个或全部仓位的起点后，才能持续推算。'
   for (const p of baseline?.positions || []) book.set(p.symbol + '|' + p.positionSide, { ...p, qty: new Decimal(p.qty), avg: new Decimal(p.avg) })
   for (const t of [...trades].sort((a, b) => a.time - b.time || a.id.localeCompare(b.id))) {
     const { raw: _raw, ...clean } = t
     let effect: Effect = 'unknown', after: string | null = null
-    if (baseline && t.time > baseline.at) {
+    if (baseline && t.time > baseline.at && (baseline.scope !== 'selected' || selected.has(t.symbol + '|' + t.positionSide))) {
       const key = t.symbol + '|' + t.positionSide
       const b = book.get(key) || { symbol: t.symbol, positionSide: t.positionSide, qty: new Decimal(0), avg: new Decimal(0) }
       const q = new Decimal(t.qty), price = new Decimal(t.price)
@@ -60,7 +61,7 @@ export function replay(trades: Trade[], baseline: Baseline | null, marks: Map<st
         } else {
           b.qty = b.qty.sub(q)
           effect = b.qty.isZero() ? 'close' : 'reduce'
-          if (b.qty.isZero()) b.avg = new Decimal(0)
+          if (b.qty.isZero()) { b.avg = new Decimal(0); b.leverage = undefined; b.marginMode = undefined }
         }
         book.set(key, b)
         if (!invalid.has(key)) after = b.qty.toString()
@@ -69,11 +70,15 @@ export function replay(trades: Trade[], baseline: Baseline | null, marks: Map<st
     views.set(t.id, { ...clean, effect, after })
   }
   const reliable = !!baseline && invalid.size === 0
-  const positions: Position[] = reliable ? [...book.values()].filter(b => b.qty.gt(0)).map(b => {
+  const positions: PositionDetails[] = reliable ? [...book.values()].filter(b => b.qty.gt(0)).map(b => {
     const mark = marks.get(b.symbol)
     const fresh = mark && now - mark.at < 60000 && now >= mark.at - 5000
     const px = fresh ? new Decimal(mark.price) : null
-    return { symbol: b.symbol, positionSide: b.positionSide, qty: b.qty.toString(), avg: b.avg.toString(),
+    const pnl = px ? (b.positionSide === 'LONG' ? px.sub(b.avg) : b.avg.sub(px)).mul(b.qty) : null
+    return { leverage: b.leverage ?? null, marginMode: b.marginMode ?? null, liquidationPrice: null,
+      metadataSource: b.leverage || b.marginMode ? 'manual' : null,
+      roi: pnl && px && b.leverage ? pnl.div(px.mul(b.qty).div(b.leverage)).mul(100).toString() : null,
+      symbol: b.symbol, positionSide: b.positionSide, qty: b.qty.toString(), avg: b.avg.toString(),
       mark: px?.toString() ?? null, markAt: fresh ? mark.at : null,
       notional: px?.mul(b.qty).toString() ?? null,
       unrealizedPnl: px ? (b.positionSide === 'LONG' ? px.sub(b.avg) : b.avg.sub(px)).mul(b.qty).toString() : null }

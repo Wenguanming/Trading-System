@@ -19,7 +19,7 @@ async function login(){
   return result.cookies.map(c=>c.name+'='+c.value).join('; ')
 }
 it('未登录无法读取快照、SSE 或操作通知',async()=>{
-  for(const url of ['/api/snapshot','/api/events','/api/export']){
+  for(const url of ['/api/snapshot','/api/events','/api/export','/api/positions/history','/api/positions/export']){
     expect((await app.inject({url})).statusCode).toBe(401)
   }
   expect((await app.inject({method:'POST',url:'/api/notifications/test',payload:{}})).statusCode).toBe(401)
@@ -62,4 +62,28 @@ it('同步期间不允许并发暂停，避免水位提交覆盖暂停状态',as
   monitor.polling=false
   await monitor.pause(true)
   expect((await monitor.repo.health()).paused).toBe(true)
+})
+
+it('仓位记录按品种日期查询并导出，快照包含计算依据',async()=>{
+  const cookie=await login()
+  const result=await app.inject({url:'/api/positions/history?symbol=BTCUSDT&limit=1',headers:{cookie}})
+  expect(result.statusCode).toBe(200)
+  expect(result.json().items[0].positions[0].qty).toBe('28.099')
+  expect(result.json().items[0].tradeRevision).toHaveLength(64)
+  const exported=await app.inject({url:'/api/positions/export?symbol=BTCUSDT',headers:{cookie}})
+  expect(exported.headers['content-type']).toContain('text/csv')
+  expect(exported.body).toContain('roi_percent_estimate')
+  expect(exported.body).toContain('28.099')
+  expect((await app.inject({url:'/api/positions/history?from=1&to=2',headers:{cookie}})).json().total).toBe(0)
+})
+it('单仓位校准拒绝空列表与非法杠杆，支持未知可选字段',async()=>{
+  const cookie=await login()
+  const at=monitor.health.lastSuccess!
+  const send=(positions:unknown[])=>app.inject({method:'POST',url:'/api/baseline',headers:{cookie},payload:{confirmed:true,baseline:{at,scope:'selected',positions}}})
+  expect((await send([])).statusCode).toBe(400)
+  const seed={symbol:'BTCUSDT',positionSide:'SHORT',qty:'28.099',avg:'64354.45'}
+  expect((await send([{...seed,leverage:'201'}])).statusCode).toBe(400)
+  expect((await send([seed])).statusCode).toBe(200)
+  expect((await monitor.snapshot()).positionScope).toBe('selected')
+  expect((await monitor.snapshot()).positions[0].leverage).toBeNull()
 })

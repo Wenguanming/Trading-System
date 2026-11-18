@@ -67,6 +67,36 @@ export async function createApp(monitor: Monitor, config: Config) {
     reply.header('Content-Disposition', 'attachment; filename="wangchao-trades.csv"').type('text/csv; charset=utf-8')
     return csv
   })
+  const positionQuery = z.object({
+    page: z.coerce.number().int().min(1).max(1000000).default(1),
+    limit: z.coerce.number().int().min(1).max(100).default(10),
+    symbol: z.string().max(40).default(''),
+    from: z.coerce.number().int().nonnegative().optional(), to: z.coerce.number().int().nonnegative().optional(),
+  })
+  app.get('/api/positions/history', async req => monitor.repo.positionHistory(positionQuery.parse(req.query)))
+  app.get('/api/positions/export', async (req, reply) => {
+    const query = positionQuery.parse(req.query)
+    const result = await monitor.repo.positionHistory({ ...query, page: 1, limit: 10000 })
+    if (result.total > 10000) throw new Error('筛选结果超过 10000 条快照，请缩小日期范围后导出')
+    const cell = (value: unknown) => '"' + String(value ?? '').replaceAll('"', '""') + '"'
+    const rows = result.items.flatMap(s => (s.positions.length || s.closed.length ? [...s.positions, ...s.closed] : [null]).map(p => [
+      s.id, new Date(s.observedAt).toISOString(), s.tradeThrough ? new Date(s.tradeThrough).toISOString() : '',
+      s.source, s.scope, s.reliable, s.reason, s.warning, s.account?.marginBalance, s.account?.asset,
+      s.account?.observedAt ? new Date(s.account.observedAt).toISOString() : '',
+      p?.symbol, p?.positionSide, p?.qty, p && 'avg' in p ? p.avg : '',
+      p && 'mark' in p ? p.mark : '', p && 'markAt' in p && p.markAt ? new Date(p.markAt).toISOString() : '',
+      p && 'notional' in p ? p.notional : '', p && 'unrealizedPnl' in p ? p.unrealizedPnl : '',
+      p && 'leverage' in p ? p.leverage : '', p && 'marginMode' in p ? p.marginMode : '',
+      p && 'roi' in p ? p.roi : '', p && 'liquidationPrice' in p ? p.liquidationPrice : '',
+      p && 'metadataSource' in p ? p.metadataSource : '', s.tradeRevision,
+    ]))
+    const header = ['snapshot_id','observed_at_utc','trades_through_utc','source','scope','reliable','reason','warning',
+      'leading_margin_balance','balance_asset','account_observed_at_utc','symbol','side','quantity','entry_price',
+      'mark_price','mark_at_utc','notional','unrealized_pnl','leverage','margin_mode','roi_percent_estimate',
+      'liquidation_price','metadata_source','trade_revision']
+    reply.header('Content-Disposition', 'attachment; filename="wangchao-positions.csv"').type('text/csv; charset=utf-8')
+    return '\uFEFF' + [header, ...rows].map(r => r.map(cell).join(',')).join('\r\n')
+  })
   app.post('/api/sync', { config: { rateLimit: { max: 6, timeWindow: '1 minute' } } }, async (_req, reply) => {
     if (monitor.polling) return reply.code(409).send({ error: '正在同步，请等待完成' })
     if (monitor.health.failures > 0 && (monitor.health.nextPoll || 0) > Date.now()) return reply.code(429).send({ error: '数据源处于退避重试中，请等待下一次自动重试' })
@@ -80,11 +110,13 @@ export async function createApp(monitor: Monitor, config: Config) {
   app.post('/api/baseline', async req => {
     const body = z.object({
       confirmed: z.literal(true),
-      baseline: z.object({ at: z.number().int().positive(), positions: z.array(z.object({
+      baseline: z.object({ at: z.number().int().positive(), scope: z.enum(['account','selected']).default('account'), positions: z.array(z.object({
         symbol: z.string().regex(/^[A-Z0-9_]{2,40}USDT$/), positionSide: z.enum(['LONG', 'SHORT']),
         qty: decimalPositive, avg: decimalPositive,
+        leverage: decimalPositive.refine(v => new Decimal(v).lte(200)).optional(), marginMode: z.enum(['CROSS','ISOLATED']).optional(),
       })).max(50) }).nullable(),
     }).parse(req.body)
+    if (body.baseline?.scope === 'selected' && !body.baseline.positions.length) throw new Error('单品种校准至少填写一个仓位')
     if (body.baseline && new Set(body.baseline.positions.map(p => p.symbol + p.positionSide)).size !== body.baseline.positions.length) throw new Error('期初仓位存在重复品种与方向')
     await monitor.setBaseline(body.baseline); return { ok: true }
   })

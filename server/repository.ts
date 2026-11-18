@@ -1,4 +1,4 @@
-import type { Baseline, Health, Trade } from '../shared/types.js'
+import type { Baseline, Health, PositionSnapshot, Trade } from '../shared/types.js'
 import type { Database } from './database.js'
 import { setState, state } from './database.js'
 import { fingerprint, notificationText, replay } from './domain.js'
@@ -41,6 +41,21 @@ export class Repository {
       await setState(tx, 'health', health)
       return changed.length
     })
+  }
+  async savePositionSnapshot(snapshot: PositionSnapshot) {
+    const symbols = [...new Set([...snapshot.positions, ...snapshot.closed].map(p => p.symbol))]
+    await this.db.query('INSERT INTO position_snapshots(id,observed_at,symbols,payload) VALUES($1,$2,$3,$4::jsonb)',
+      [snapshot.id, snapshot.observedAt, symbols, JSON.stringify(snapshot)])
+  }
+  async latestPositionSnapshot(): Promise<PositionSnapshot | null> {
+    return (await this.db.query<{ payload: PositionSnapshot }>('SELECT payload FROM position_snapshots ORDER BY observed_at DESC,id DESC LIMIT 1')).rows[0]?.payload ?? null
+  }
+  async positionHistory(q: { page: number; limit: number; symbol?: string; from?: number; to?: number }) {
+    const args = [q.symbol?.toUpperCase() || '', q.from ?? 0, q.to ?? Number.MAX_SAFE_INTEGER]
+    const where = "WHERE ($1='' OR $1=ANY(symbols)) AND observed_at >= $2 AND observed_at <= $3"
+    const total = (await this.db.query<{ count: string }>('SELECT COUNT(*) AS count FROM position_snapshots ' + where, args)).rows[0].count
+    const rows = await this.db.query<{ payload: PositionSnapshot }>('SELECT payload FROM position_snapshots ' + where + ' ORDER BY observed_at DESC,id DESC LIMIT $4 OFFSET $5', [...args, q.limit, (q.page - 1) * q.limit])
+    return { items: rows.rows.map(r => r.payload), total: Number(total), page: q.page, limit: q.limit }
   }
   async notificationStats() {
     const rows = await this.db.query<{ status: string; count: string }>('SELECT status,COUNT(*) AS count FROM notifications GROUP BY status')

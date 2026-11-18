@@ -40,6 +40,9 @@ export async function migrate(db: Database) {
     'CREATE INDEX IF NOT EXISTS trades_time ON trades(time DESC)',
     'CREATE TABLE IF NOT EXISTS trade_versions (id TEXT NOT NULL, revision INTEGER NOT NULL, observed_at BIGINT NOT NULL, payload JSONB NOT NULL, PRIMARY KEY(id, revision))',
     "CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, body TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, due_at BIGINT NOT NULL, created_at BIGINT NOT NULL, sent_at BIGINT, error TEXT)",
+    'CREATE TABLE IF NOT EXISTS position_snapshots (id TEXT PRIMARY KEY, observed_at BIGINT NOT NULL, symbols TEXT[] NOT NULL, payload JSONB NOT NULL)',
+    'CREATE INDEX IF NOT EXISTS position_snapshots_time ON position_snapshots(observed_at DESC,id DESC)',
+    'CREATE INDEX IF NOT EXISTS position_snapshots_symbols ON position_snapshots USING GIN(symbols)',
     'CREATE INDEX IF NOT EXISTS notifications_due ON notifications(status, due_at)',
   ]
   for (const sql of statements) await db.query(sql)
